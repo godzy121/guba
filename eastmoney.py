@@ -13,9 +13,11 @@ This module keeps the original behaviour but tidies the implementation so
 that the limiter is honoured and a couple of additional safeguards are in
 place.  The intention is to provide an easy to consume Python API while
 remaining usable as a small utility script.
-"""
 
-from __future__ import annotations
+为了方便在聚宽等无法轻易创建额外文件的研究环境里使用，模块最后
+提供了 :func:`register_eastmoney_helpers`，可以直接把常用函数注入到
+Notebook 的 ``globals()`` 中，复制粘贴即可使用。
+"""
 
 import logging
 import os
@@ -23,7 +25,6 @@ import random
 import re
 import time
 import uuid
-from dataclasses import dataclass
 from datetime import date as date_cls
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -118,29 +119,24 @@ def date_dash(value: Union[str, datetime, date_cls]) -> str:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class RateLimiter:
+class RateLimiter(object):
     """Token bucket style rate limiter with jitter.
 
-    The original implementation defined ``def init`` instead of
-    ``__init__`` which meant that none of the attributes were available at
-    runtime.  ``wait`` consequently raised ``AttributeError`` on the first
-    call and the limiter was silently bypassed.  This class keeps the same
-    behaviour (sleeping for ``min_interval`` seconds plus a random jitter)
-    but guarantees thread-safety and predictable state updates.
+    聚宽等平台通常运行在较老的 Python 版本（例如 3.6），因此不能依赖
+    ``dataclasses``。这个实现保留了原有功能，同时兼容旧版本。
     """
 
-    min_interval: float = 1.0
-    jitter: float = 0.4
-
-    def __post_init__(self) -> None:
-        if self.min_interval < 0:
+    def __init__(self, min_interval=1.0, jitter=0.4):
+        if min_interval < 0:
             raise ValueError("min_interval must be non-negative")
-        if self.jitter < 0:
+        if jitter < 0:
             raise ValueError("jitter must be non-negative")
-        self._last: float = 0.0
 
-    def wait(self) -> None:
+        self.min_interval = float(min_interval)
+        self.jitter = float(jitter)
+        self._last = 0.0
+
+    def wait(self):
         now = time.time()
         gap = now - self._last
         wait_for = self.min_interval - gap
@@ -471,6 +467,51 @@ def retry_failed_dates_em(
     with open(fail_log_path, "w", encoding="utf-8") as handle:
         for dash in remain:
             handle.write(dash + "\n")
+
+
+def register_eastmoney_helpers(namespace=None, prefix=""):
+    """Inject helpers into ``namespace`` for notebook style workflows.
+
+    Example::
+
+        register_eastmoney_helpers(globals())
+        crawl_em_heat_by_range(...)
+
+    Parameters
+    ----------
+    namespace:
+        ``dict``-like object to receive the helpers.  Defaults to the caller's
+        global namespace.
+    prefix:
+        Optional string prefix applied to the exported names.  For example,
+        ``prefix="em_"`` will export ``em_crawl_em_heat_by_range`` etc.
+    """
+
+    if namespace is None:
+        import inspect
+
+        frame = inspect.currentframe()
+        try:
+            namespace = frame.f_back.f_globals if frame and frame.f_back else globals()
+        finally:
+            del frame
+
+    exports = {
+        "RateLimiter": RateLimiter,
+        "EastmoneyClient": EastmoneyClient,
+        "crawl_em_heat_by_range": crawl_em_heat_by_range,
+        "retry_failed_dates_em": retry_failed_dates_em,
+        "parse_cookie_str": parse_cookie_str,
+        "safe_float": safe_float,
+        "to_date_obj": to_date_obj,
+        "date_zh": date_zh,
+        "date_dash": date_dash,
+    }
+
+    for name, value in exports.items():
+        namespace[prefix + name] = value
+
+    return exports
 
 
 def _load_cookie_from_env() -> Optional[str]:
